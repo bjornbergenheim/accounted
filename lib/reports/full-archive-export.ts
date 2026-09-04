@@ -1027,6 +1027,21 @@ export const MASTER_DATA_DUMP_TABLES: MasterDataTableSpec[] = [
     file: 'supplier_payment_batch_items.json',
     orderBy: 'created_at',
   },
+  // Payment orders (PIS): the same class of underlag as the batches above, for
+  // payments handed straight to the bank over PSD2 instead of downloaded as a
+  // file. request_snapshot is the exact instruction the bank received, so a
+  // company that leaves with its archive keeps the answer to "what did we ask
+  // the bank to pay, and what did it say back".
+  {
+    name: 'bank_payment_orders',
+    file: 'bank_payment_orders.json',
+    orderBy: 'created_at',
+  },
+  {
+    name: 'bank_payment_order_items',
+    file: 'bank_payment_order_items.json',
+    orderBy: 'created_at',
+  },
   // Underlag intake: the chat answers behind a verifikat.
   //
   // A projection, not the whole table. `channel_context` holds the human

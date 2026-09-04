@@ -1011,6 +1011,89 @@ export interface SupplierPaymentBatchItem {
   created_at: string
 }
 
+// Bank payment orders: a payment instruction handed straight to the bank over
+// PSD2 (Enable Banking payment initiation) instead of being downloaded as a
+// betalfil. Creating or completing one books NOTHING; settlement stays with
+// bank matching and mark-as-paid, exactly as for the payment files.
+
+/** What is being paid. Keyed by batch id, AGI period ('2026-08') or salary run id. */
+export type BankPaymentOrderSourceType = 'supplier_batch' | 'tax_payment' | 'salary_run'
+
+/**
+ * Our own lifecycle, distinct from the bank's raw ISO 20022 code (eb_status).
+ * 'accepted', 'rejected', 'cancelled' and 'failed' are terminal; 'unknown'
+ * means the bank's answer could not be read and the user must check their
+ * internet bank before resending.
+ */
+export type BankPaymentOrderStatus =
+  | 'draft'
+  | 'awaiting_authorization'
+  | 'authorized'
+  | 'submitted'
+  | 'accepted'
+  | 'rejected'
+  | 'cancelled'
+  | 'failed'
+  | 'unknown'
+
+export interface BankPaymentOrder {
+  id: string
+  company_id: string
+  user_id: string
+  bank_connection_id: string | null
+  aspsp_name: string
+  aspsp_country: string
+  psu_type: 'personal' | 'business' | null
+  source_type: BankPaymentOrderSourceType
+  source_id: string
+  /** Enable Banking payment type, e.g. BULK_DOMESTIC_SE_GIRO. */
+  payment_type: string
+  currency: string
+  total_amount: number
+  item_count: number
+  requested_execution_date: string | null
+  /** The exact CreatePaymentRequest body that was sent. */
+  request_snapshot: Record<string, unknown>
+  eb_payment_id: string | null
+  auth_url: string | null
+  oauth_state: string | null
+  status: BankPaymentOrderStatus
+  /** Raw bank status code: RCVD, ACCP, ACSC, RJCT, ... */
+  eb_status: string | null
+  final_status: boolean
+  status_reason: string | null
+  /** Swedish, user-facing. Never a raw Enable Banking envelope. */
+  error_message: string | null
+  /** Defaults to the epoch so the poller's work list is one `<` comparison. */
+  last_polled_at: string
+  authorized_at: string | null
+  submitted_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface BankPaymentOrderItem {
+  id: string
+  order_id: string
+  company_id: string
+  supplier_invoice_id: string | null
+  amount: number
+  payment_date: string
+  payee_type: SupplierPaymentBatchPayeeType
+  payee_bankgiro: string | null
+  payee_plusgiro: string | null
+  payee_clearing: string | null
+  payee_account: string | null
+  payee_name: string
+  /** Null for salary payouts, which carry no remittance information at all. */
+  reference_type: SupplierPaymentBatchReferenceType | null
+  reference: string | null
+  eb_transaction_id: string | null
+  item_status: string | null
+  created_at: string
+}
+
 // Kundorder (sales order): the non-ledger document between agreement and
 // invoice. Never books. Four-state header machine; delivery and invoicing
 // progress are derived per line (see SalesOrderItem.invoiced_qty).

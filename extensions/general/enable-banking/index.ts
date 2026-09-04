@@ -16,6 +16,13 @@ import {
 import { syncAccountTransactions } from './lib/sync'
 import { triggerConnectionSync } from './lib/trigger-sync'
 import { findReusableSessions, countLiveSiblings } from './lib/session-sharing'
+import { getAspspPaymentTypes, resolvePisAvailability } from './lib/payment-capabilities'
+import {
+  createAndSendOrder,
+  refreshOrderStatus,
+  resolveOrderBankIdentity,
+} from './lib/payment-orders'
+import { loadSupplierBatchSource } from './lib/payment-sources'
 import {
   runUnattendedReconciliationSweep,
   toSweepSummary,
@@ -38,8 +45,44 @@ const RATE_LIMIT_ACCOUNTS = { maxRequests: 20, windowMs: 60_000 }
 const RATE_LIMIT_SYNC = { maxRequests: 10, windowMs: 60_000 }
 const RATE_LIMIT_DISCONNECT = { maxRequests: 10, windowMs: 60_000 }
 const RATE_LIMIT_ATTACH = { maxRequests: 10, windowMs: 60_000 }
+// Payment initiation moves real money, so the create window is the tightest of
+// the lot: a legitimate user sends one batch, looks at BankID, and comes back.
+const RATE_LIMIT_PAYMENT_ORDERS = { maxRequests: 5, windowMs: 60_000 }
+const RATE_LIMIT_PAYMENT_REFRESH = { maxRequests: 30, windowMs: 60_000 }
 
 const MAX_ENABLED_UIDS = 50
+
+/** Roles allowed to move money. Viewers may look at orders, never create one. */
+const PAYMENT_WRITE_ROLES = new Set(['owner', 'admin', 'member'])
+
+/**
+ * Defense-in-depth RBAC for the payment routes. The extension dispatcher
+ * authenticates and resolves a company but does NOT check the member's role,
+ * so every write handler must check it itself. Mirrors requireWriteRole in the
+ * bolagsverket extension.
+ *
+ * Returns null on success, a 403/500 NextResponse on failure.
+ */
+async function requirePaymentWriteRole(ctx: ExtensionContext): Promise<NextResponse | null> {
+  const { data, error } = await ctx.supabase
+    .from('company_members')
+    .select('role')
+    .eq('company_id', ctx.companyId)
+    .eq('user_id', ctx.userId)
+    .maybeSingle()
+
+  if (error) {
+    ctx.log.error('[enable-banking] payment role lookup failed', { error: error.message })
+    return NextResponse.json({ error: 'Kunde inte kontrollera behörighet' }, { status: 500 })
+  }
+  if (!data?.role || !PAYMENT_WRITE_ROLES.has(data.role as string)) {
+    return NextResponse.json(
+      { error: 'Du har inte behörighet att skicka betalningar' },
+      { status: 403 },
+    )
+  }
+  return null
+}
 
 /**
  * Enable Banking (PSD2) extension
@@ -1907,6 +1950,271 @@ export const enableBankingExtension: Extension = {
         }
 
         return NextResponse.json({ success: true })
+      },
+    },
+    {
+      // Whether this installation may initiate payments at all, and what the
+      // company's bank supports. The UI's ONLY source for "show the send-to-bank
+      // affordance": a NEXT_PUBLIC_ flag would be constant-folded at build time,
+      // which is how every Docker self-host once shipped silently paywalled.
+      // Read-only and ungated by capability on purpose: the answer for a company
+      // without bank sync is simply enabled:false with a reason.
+      method: 'GET',
+      path: '/payments/capabilities',
+      handler: async (_request: Request, ctx?: ExtensionContext) => {
+        const log = ctx?.log ?? console
+        if (!ctx?.companyId || !ctx?.supabase) {
+          return NextResponse.json({ error: 'Company context required' }, { status: 400 })
+        }
+
+        const availability = await resolvePisAvailability(ctx.companyId)
+        if (!availability.enabled) {
+          return NextResponse.json({ enabled: false, reason: availability.reason })
+        }
+
+        const identity = await resolveOrderBankIdentity(ctx.supabase, ctx.companyId)
+        if (!identity) {
+          return NextResponse.json({ enabled: false, reason: 'no_bank_connection' })
+        }
+
+        try {
+          const paymentTypes = await getAspspPaymentTypes(
+            identity.aspspName,
+            identity.aspspCountry,
+            identity.psuType,
+          )
+          return NextResponse.json({
+            enabled: paymentTypes.length > 0,
+            ...(paymentTypes.length === 0 ? { reason: 'aspsp_has_no_payments' } : {}),
+            environment: availability.environment,
+            bank_name: identity.aspspName,
+            psu_type: identity.psuType,
+            payment_types: paymentTypes.map((p) => p.payment_type),
+          })
+        } catch (error) {
+          log.error('[enable-banking] payments/capabilities: ASPSP lookup failed', {
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return NextResponse.json({ enabled: false, reason: 'aspsp_lookup_failed' })
+        }
+      },
+    },
+    {
+      // Create AND send a payment order, returning the URL the user must be
+      // redirected to for BankID. Creation and sending are one call so an order
+      // row can never sit around in 'draft' blocking its source with nothing at
+      // the bank behind it.
+      method: 'POST',
+      path: '/payments/orders',
+      handler: async (request: Request, ctx?: ExtensionContext) => {
+        const log = ctx?.log ?? console
+        if (!ctx?.companyId || !ctx?.supabase) {
+          return NextResponse.json({ error: 'Company context required' }, { status: 400 })
+        }
+        const forbidden = await requirePaymentWriteRole(ctx)
+        if (forbidden) return forbidden
+
+        const blocked = await requireCapability(ctx.supabase, ctx.companyId, CAPABILITY.bank_sync)
+        if (blocked) return blocked
+
+        const rl = await checkRateLimit({
+          prefix: 'enable-banking:payment-orders',
+          identifier: ctx.userId,
+          ...RATE_LIMIT_PAYMENT_ORDERS,
+        })
+        if (!rl.ok) return rl.response!
+
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL
+        if (!appUrl) {
+          log.error('[enable-banking] payments/orders: NEXT_PUBLIC_APP_URL is not set')
+          return NextResponse.json(
+            { error: 'Instansens adress är inte konfigurerad (NEXT_PUBLIC_APP_URL).' },
+            { status: 500 },
+          )
+        }
+
+        let body: { source_type?: string; source_id?: string }
+        try {
+          body = await request.json()
+        } catch {
+          return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+        }
+
+        // v1 pays supplier batches. The tax and salary sources land next and
+        // reuse everything below unchanged.
+        if (body.source_type !== 'supplier_batch' || !body.source_id) {
+          return NextResponse.json(
+            { error: 'source_type must be supplier_batch and source_id is required' },
+            { status: 400 },
+          )
+        }
+
+        const loaded = await loadSupplierBatchSource(ctx.supabase, ctx.companyId, body.source_id)
+        if (!loaded.ok) {
+          return NextResponse.json(
+            { error: 'batch_' + loaded.reason, code: loaded.reason },
+            { status: loaded.reason === 'not_found' ? 404 : 400 },
+          )
+        }
+
+        const result = await createAndSendOrder({
+          supabase: ctx.supabase,
+          companyId: ctx.companyId,
+          userId: ctx.userId,
+          sourceType: 'supplier_batch',
+          sourceId: body.source_id,
+          family: 'giro',
+          instructions: loaded.source.instructions,
+          debtor: loaded.source.debtor,
+          origin: appUrl,
+          returnPath: '/supplier-invoices/payment-files',
+        })
+
+        if (!result.ok) {
+          log.warn('[enable-banking] payments/orders refused', {
+            reason: result.reason,
+            companyId: ctx.companyId,
+            sourceId: body.source_id,
+          })
+          // 409 for "there is already an order", 502 for an upstream refusal,
+          // 400 for everything the caller could fix.
+          const status =
+            result.reason === 'already_sent'
+              ? 409
+              : result.reason === 'send_rejected' || result.reason === 'send_indeterminate'
+                ? 502
+                : 400
+          return NextResponse.json({ ...result, ok: false }, { status })
+        }
+
+        return NextResponse.json({ ok: true, order: result.order, auth_url: result.authUrl })
+      },
+    },
+    {
+      // Orders for one source (or the company's most recent), so the payment
+      // screens can show "sent to the bank" state next to the download button.
+      method: 'GET',
+      path: '/payments/orders',
+      handler: async (request: Request, ctx?: ExtensionContext) => {
+        if (!ctx?.companyId || !ctx?.supabase) {
+          return NextResponse.json({ error: 'Company context required' }, { status: 400 })
+        }
+        const url = new URL(request.url)
+        const sourceType = url.searchParams.get('source_type')
+        const sourceId = url.searchParams.get('source_id')
+
+        let query = ctx.supabase
+          .from('bank_payment_orders')
+          .select('*')
+          .eq('company_id', ctx.companyId)
+          .order('created_at', { ascending: false })
+          .limit(50)
+
+        if (sourceType) query = query.eq('source_type', sourceType)
+        if (sourceId) query = query.eq('source_id', sourceId)
+
+        const { data, error } = await query
+        if (error) {
+          return NextResponse.json({ error: 'Kunde inte hämta betalningsordrar' }, { status: 500 })
+        }
+        return NextResponse.json({ orders: data ?? [] })
+      },
+    },
+    {
+      // Ask the bank for the current status now, instead of waiting for the
+      // polling cron. Used by the return-from-BankID screen.
+      method: 'POST',
+      path: '/payments/orders/:orderId/refresh',
+      handler: async (request: Request, ctx?: ExtensionContext) => {
+        if (!ctx?.companyId || !ctx?.supabase) {
+          return NextResponse.json({ error: 'Company context required' }, { status: 400 })
+        }
+        const forbidden = await requirePaymentWriteRole(ctx)
+        if (forbidden) return forbidden
+
+        const orderId = new URL(request.url).searchParams.get('_orderId')
+        if (!orderId) return NextResponse.json({ error: 'orderId required' }, { status: 400 })
+
+        const rl = await checkRateLimit({
+          prefix: 'enable-banking:payment-refresh',
+          identifier: ctx.userId,
+          ...RATE_LIMIT_PAYMENT_REFRESH,
+        })
+        if (!rl.ok) return rl.response!
+
+        const { data: order, error } = await ctx.supabase
+          .from('bank_payment_orders')
+          .select('*')
+          .eq('id', orderId)
+          .eq('company_id', ctx.companyId)
+          .maybeSingle()
+
+        if (error || !order) {
+          return NextResponse.json({ error: 'Betalningsordern hittades inte' }, { status: 404 })
+        }
+
+        const refreshed = await refreshOrderStatus(ctx.supabase, order)
+        const { data: after } = await ctx.supabase
+          .from('bank_payment_orders')
+          .select('*')
+          .eq('id', orderId)
+          .eq('company_id', ctx.companyId)
+          .maybeSingle()
+
+        return NextResponse.json({ ok: refreshed.ok, order: after ?? order })
+      },
+    },
+    {
+      // Close an order the user has decided is not happening. This is also the
+      // ONLY way out of 'unknown', which is deliberate: an order whose fate we
+      // could not read blocks its source until a human says they checked their
+      // internet bank.
+      method: 'POST',
+      path: '/payments/orders/:orderId/cancel',
+      handler: async (request: Request, ctx?: ExtensionContext) => {
+        if (!ctx?.companyId || !ctx?.supabase) {
+          return NextResponse.json({ error: 'Company context required' }, { status: 400 })
+        }
+        const forbidden = await requirePaymentWriteRole(ctx)
+        if (forbidden) return forbidden
+
+        const orderId = new URL(request.url).searchParams.get('_orderId')
+        if (!orderId) return NextResponse.json({ error: 'orderId required' }, { status: 400 })
+
+        const { data: order, error } = await ctx.supabase
+          .from('bank_payment_orders')
+          .select('id, status')
+          .eq('id', orderId)
+          .eq('company_id', ctx.companyId)
+          .maybeSingle()
+
+        if (error || !order) {
+          return NextResponse.json({ error: 'Betalningsordern hittades inte' }, { status: 404 })
+        }
+        if (['accepted', 'rejected', 'cancelled', 'failed'].includes(order.status)) {
+          return NextResponse.json(
+            { error: 'Betalningsordern är redan avslutad', status: order.status },
+            { status: 409 },
+          )
+        }
+
+        const { error: updateError } = await ctx.supabase
+          .from('bank_payment_orders')
+          .update({
+            status: 'cancelled',
+            final_status: true,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', orderId)
+          .eq('company_id', ctx.companyId)
+
+        if (updateError) {
+          return NextResponse.json(
+            { error: 'Kunde inte avbryta betalningsordern' },
+            { status: 500 },
+          )
+        }
+        return NextResponse.json({ ok: true })
       },
     },
   ],

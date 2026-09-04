@@ -373,6 +373,22 @@ ENABLE_BANKING_PRIVATE_KEY=...                         # the application's priva
 
 The `_PRODUCTION` variants (`ENABLE_BANKING_APP_ID_PRODUCTION`, `ENABLE_BANKING_PRIVATE_KEY_PRODUCTION`, `ENABLE_BANKING_API_URL_PRODUCTION`) win over the plain names when both are set. Setting any one of the four id/key variables switches the bank upstream out of connector mode, so always set the id and the key as a pair: a lone `ENABLE_BANKING_APP_ID` leaves you with neither the connector nor a working own client.
 
+**Betalningsinitiering (PIS): sending payments instead of downloading a betalfil.** Off by default. Turning it on lets an approved supplier payment batch be handed straight to your bank and signed with BankID, instead of being downloaded as a pain.001 file and uploaded in your internet bank. Nothing about the file path changes: the download stays, and a sent payment still books nothing (settlement remains bank matching / mark-as-paid, exactly as before).
+
+Three things must all be true, and the app tells you which one is missing:
+
+1. Your Enable Banking application is contracted for the `PIS` service, not just `AIS`. Payment initiation is a separate agreement with Enable Banking, and under PSD2 it is a payment initiation service in its own right; account-information access does not include it. The app reads this from `GET /application` and reports `no_pis_service` when it is absent.
+2. The redirect URL `${NEXT_PUBLIC_APP_URL}/api/extensions/enable-banking/payments/callback` is registered on the application, alongside the account-information callback.
+3. Your bank supports payment initiation through Enable Banking. The app reads the bank's own `payments` capability record and reports `aspsp_has_no_payments` when the list is empty.
+
+```bash
+ENABLE_BANKING_PIS_ENABLED=true
+```
+
+This only works with own credentials: the connector proxy exposes no payments path, and payment initiation is licensed separately from account information. An instance in connector mode reports `connector_mode` and shows nothing.
+
+The instance polls payment status every five minutes (`/api/extensions/enable-banking/payments/poll/cron`). Enable Banking can also push status webhooks, but the webhook URL has to be reachable from the internet, so polling is what a LAN-only instance uses.
+
 **Skatteverket (VAT and AGI submission, skattekonto sync).** Apply for API access in Skatteverket's developer portal (Utvecklarportalen): a separate OAuth2 client and API gateway credentials, one integration agreement per API (momsdeklaration, the two arbetsgivardeklaration APIs, skattekonto), and Skatteverket's approval test before production access is granted. Request the scopes the app sends on every authorization: `momsdeklaration inkforetag skahmst skattekonto ska agd agdredovisningperiod` (the two AGI scopes are both required: `agd` for inlämning and `agdredovisningperiod` for kvittenser; a token missing the second one files fine and then fails on the receipt). Register the redirect URI `${NEXT_PUBLIC_APP_URL}/api/extensions/ext/skatteverket/callback` on the client, then set:
 
 ```bash

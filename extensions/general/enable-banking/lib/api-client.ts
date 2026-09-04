@@ -16,6 +16,7 @@ import { getAuthorizationHeader } from './jwt'
 import { deriveTransactionLabel } from './transaction-label'
 import { FALLBACK_DESCRIPTION } from '@/lib/transactions/external-id'
 import { bankConnectorMode, CONNECTOR_COMPANY_HEADER } from '@/lib/connect/instance/upstreams'
+import type { EnableBankingService, ResponsePaymentType } from '@/lib/payments/pis-types'
 import { dateFromDaysBefore, historyWindowDays } from './history-window'
 
 // Prefer _PRODUCTION variant; sandbox uses api.tilisy.com, production uses api.enablebanking.com
@@ -35,6 +36,11 @@ export interface ASPSP {
   max_consent_validity?: number
   // Enable Banking returns this field as `auth_methods` on the ASPSP object.
   auth_methods?: AuthMethod[]
+  // Payment types this ASPSP supports, with their per-type capabilities
+  // (creditor schemes, reference schemes, execution-date support, final
+  // successful statuses). Present in the /aspsps response and read by the
+  // payment-initiation path; the AIS path ignores it.
+  payments?: ResponsePaymentType[]
 }
 
 export interface AuthMethod {
@@ -387,6 +393,15 @@ async function authenticatedFetch(
 }
 
 /**
+ * The authenticated-fetch seam, exported for the payment-initiation client so
+ * it inherits the JWT cache, the timeout and the base-URL resolution instead of
+ * growing a second copy that can drift. PIS callers must still refuse
+ * connector mode themselves: the hosted proxy has no /payments path and hosted
+ * holds no PISP licence, so routing a payment through it is never correct.
+ */
+export { authenticatedFetch as ebFetch }
+
+/**
  * Retry wrapper for idempotent read operations.
  * Retries on 429, 502, 503, 504, and AbortError (timeout).
  */
@@ -472,6 +487,50 @@ export async function getASPSPs(country: string = 'SE', psuType?: 'personal' | '
 
   const data = await response.json()
   return data.aspsps || []
+}
+
+export interface ApplicationDetails {
+  name?: string
+  environment?: string
+  active: boolean
+  countries: string[]
+  /** ['AIS'] on an account-information-only registration, ['AIS','PIS'] with payments. */
+  services: EnableBankingService[]
+  redirect_urls: string[]
+}
+
+/**
+ * Application details, including which Enable Banking services the registration
+ * is actually contracted for.
+ *
+ * This is the honest answer to "can this instance initiate payments at all".
+ * PIS requires a separate contract with Enable Banking; without it every
+ * POST /payments fails, and the useful place to say so is in the settings UI,
+ * not in a stack trace after the user has built a batch.
+ */
+export async function getApplicationDetails(): Promise<ApplicationDetails> {
+  const response = await authenticatedFetchWithRetry('/application')
+
+  if (!response.ok) {
+    const body = await response.text()
+    console.error('[enable-banking] getApplicationDetails failed', {
+      status: response.status,
+      statusText: response.statusText,
+      body,
+      apiUrl: ENABLE_BANKING_API_URL,
+    })
+    throw new Error(`Failed to fetch application details (${response.status})`)
+  }
+
+  const data = await response.json()
+  return {
+    name: data.name,
+    environment: data.environment,
+    active: data.active === true,
+    countries: Array.isArray(data.countries) ? data.countries : [],
+    services: Array.isArray(data.services) ? data.services : [],
+    redirect_urls: Array.isArray(data.redirect_urls) ? data.redirect_urls : [],
+  }
 }
 
 /**

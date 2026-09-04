@@ -23,6 +23,10 @@
       "schedule": "0 5 * * *"
     },
     {
+      "path": "/api/extensions/enable-banking/payments/poll/cron",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/extensions/stripe/transactions/cron",
       "schedule": "30 3 * * *"
     },
