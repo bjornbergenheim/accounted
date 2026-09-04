@@ -10,7 +10,7 @@ import { SortableRow } from '@/components/ui/sortable-row'
 import { AutoGrowTextarea } from '@/components/invoices/AutoGrowTextarea'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { addDays, format } from 'date-fns'
+import { addDays, format, isValid as isValidDate, parseISO } from 'date-fns'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { TagInput } from '@/components/ui/tag-input'
@@ -42,6 +42,7 @@ import {
   resolveEntryKey,
   type EntryGhostCell,
   type EntryKeyAction,
+  planDueDateSync,
   type NextStep,
 } from '@/components/invoices/invoice-editor-flow'
 import { sortArticles } from '@/lib/articles/sort'
@@ -120,6 +121,10 @@ import {
 } from '@/types'
 
 const currencies: readonly Currency[] = CURRENCIES
+
+// Payment term used before a customer default or a hand-picked due date says
+// otherwise. 30 dagar netto is the Swedish B2B norm.
+const DEFAULT_PAYMENT_TERM_DAYS = 30
 
 // A draft invoice + its line items, as fetched for the edit flow.
 export type InvoiceForEdit = Invoice & { items: InvoiceItem[] }
@@ -731,7 +736,7 @@ export default function InvoiceEditor(props: InvoiceEditorProps = { mode: 'creat
     if (isEditMode) return
     setValue('invoice_date', format(new Date(), 'yyyy-MM-dd'))
     setValue('received_date', format(new Date(), 'yyyy-MM-dd'))
-    setValue('due_date', format(addDays(new Date(), 30), 'yyyy-MM-dd'))
+    setValue('due_date', format(addDays(new Date(), DEFAULT_PAYMENT_TERM_DAYS), 'yyyy-MM-dd'))
     setValue('valid_until', format(addDays(new Date(), 30), 'yyyy-MM-dd'))
   }, [])
 
@@ -805,6 +810,31 @@ export default function InvoiceEditor(props: InvoiceEditorProps = { mode: 'creat
   const watchPersonnummer = watch('deduction_personnummer')
   const watchHousingDesignation = watch('deduction_housing_designation')
   const watchExternalNumber = watch('external_invoice_number')
+
+  // Förfallodatum follows fakturadatum on the current payment term. The term
+  // itself is read back off the date pair on screen (customer default, loaded
+  // draft, or a due date the user picked by hand), so moving the invoice date
+  // to the end of the month keeps "30 dagar" instead of stranding the due date
+  // where it was and making the user count days. See planDueDateSync.
+  const dueDateSyncRef = useRef<{ previousInvoiceDate: string | null; terms: number }>({
+    previousInvoiceDate: null,
+    terms: DEFAULT_PAYMENT_TERM_DAYS,
+  })
+  useEffect(() => {
+    const plan = planDueDateSync({
+      invoiceDate: watchInvoiceDate ?? '',
+      dueDate: watchDueDate ?? '',
+      previousInvoiceDate: dueDateSyncRef.current.previousInvoiceDate,
+      terms: dueDateSyncRef.current.terms,
+    })
+    dueDateSyncRef.current = {
+      previousInvoiceDate: plan.previousInvoiceDate,
+      terms: plan.terms,
+    }
+    if (plan.dueDate && plan.dueDate !== watchDueDate) {
+      setValue('due_date', plan.dueDate, { shouldDirty: true, shouldValidate: true })
+    }
+  }, [watchInvoiceDate, watchDueDate, setValue])
 
   // After customers state updates with the new customer, select it
   useEffect(() => {
@@ -1303,11 +1333,18 @@ export default function InvoiceEditor(props: InvoiceEditorProps = { mode: 'creat
       if (customer) {
         const nextDefaultRate = resolveLineVatRates(customer).defaultRate
         if (didInitialCustomerSync.current) {
-          // Update due date based on customer payment terms
+          // Update due date based on customer payment terms, counted from the
+          // invoice date the form is actually on: picking a customer after
+          // setting fakturadatum to the 31st must give the 31st + terms, not
+          // today + terms.
           if (customer.default_payment_terms) {
+            const anchor = parseISO(getValues('invoice_date') || '')
             setValue(
               'due_date',
-              format(addDays(new Date(), customer.default_payment_terms), 'yyyy-MM-dd')
+              format(
+                addDays(isValidDate(anchor) ? anchor : new Date(), customer.default_payment_terms),
+                'yyyy-MM-dd'
+              )
             )
           }
 
@@ -1332,7 +1369,7 @@ export default function InvoiceEditor(props: InvoiceEditorProps = { mode: 'creat
         didInitialCustomerSync.current = true
       }
     }
-  }, [watchCustomerId, customers, setValue])
+  }, [watchCustomerId, customers, setValue, getValues])
 
   // One-click VIES check from the draft (#2749). /api/vat/validate has
   // already stamped the customer row; mirror it on the local copy so the
