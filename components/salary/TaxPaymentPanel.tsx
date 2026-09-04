@@ -16,6 +16,8 @@ import { failureDescription } from '@/lib/browser/action-failure'
 import type { ErrorLocale } from '@/lib/errors/get-error-message'
 import { cn, formatCurrency, formatDateTime } from '@/lib/utils'
 import { roundOre } from '@/lib/money'
+import { useBankPayments } from '@/components/payments/use-bank-payments'
+import { SendToBankAction } from '@/components/payments/SendToBankAction'
 
 type PaymentFormat = 'bg_lb' | 'pain001'
 
@@ -37,6 +39,8 @@ interface TaxPaymentPanelProps {
   senderBankgiro?: string | null
   senderIban?: string | null
   readOnly?: boolean
+  /** Page path to return to after signing a payment at the bank. */
+  returnPath: string
   onChange?: () => void
 }
 
@@ -56,6 +60,7 @@ export function TaxPaymentPanel({
   senderBankgiro,
   senderIban,
   readOnly,
+  returnPath,
   onChange,
 }: TaxPaymentPanelProps) {
   const t = useTranslations('salary_payments')
@@ -65,6 +70,10 @@ export function TaxPaymentPanel({
   const [downloading, setDownloading] = useState(false)
   const [marking, setMarking] = useState(false)
   const [paymentDeadline, setPaymentDeadline] = useState<string>('')
+  // The AGI period is the source id: one live payment order per period, which
+  // is exactly the rule that stops the same month being paid twice. The return
+  // path is this panel's own page, since that is where the result is shown.
+  const payments = useBankPayments({ sourceType: 'tax_payment', returnPath })
 
   useEffect(() => {
     const m = /^(\d{4})-(\d{2})$/.exec(period)
@@ -233,7 +242,17 @@ export function TaxPaymentPanel({
       )}
 
       {!readOnly && (
-        <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+          {/* Payment initiation: renders nothing unless the instance has it
+              switched on, so the download below stays the only path by
+              default. Sending books nothing either way. */}
+          <SendToBankAction
+            payments={payments}
+            sourceId={period}
+            sourceIsOpen={!taxPaidAt && totalAmount > 0}
+            amount={totalAmount}
+            itemCount={1}
+          />
           <Button onClick={handleDownload} disabled={downloading || marking}>
             {downloading ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />

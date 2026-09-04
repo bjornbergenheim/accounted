@@ -8,7 +8,10 @@ import { resolveBatchDebtor } from '@/lib/payments/batch-service'
 import { resolveSkattekontoOcr, SKATTEKONTO_BANKGIRO } from '@/lib/skatteverket/skattekonto-ocr'
 import { validateBankgiroNumber } from '@/lib/bankgiro/luhn'
 import { getBranding } from '@/lib/branding/service'
-import { roundOre } from '@/lib/money'
+import {
+  computeTaxPaymentDate,
+  resolveDeclaredTaxTotal,
+} from '@/lib/skatteverket/tax-payment'
 
 ensureInitialized()
 
@@ -66,17 +69,9 @@ export const GET = withRouteContext<{ params: Promise<{ period: string }> }>(
     )
   }
 
-  // Declarations generated since the whole-krona change store the declared
-  // amounts (what Skatteverket computes from the underlag and draws): pay
-  // exactly those. Legacy öre-bearing rows predate that storage; their
-  // salary bookings credited 2731 with the öre, so keep paying öre-exact as
-  // before: the öre lands as a small skattekonto överskott (the pre-existing
-  // equilibrium) instead of stranding on 2731 with no counterpart.
-  const declaredWholeKronor =
-    Number.isInteger(agi.total_tax) && Number.isInteger(agi.total_avgifter)
-  const totalAmount = declaredWholeKronor
-    ? agi.total_tax + agi.total_avgifter
-    : roundOre(agi.total_tax + agi.total_avgifter)
+  // Shared with the PSD2 payment order (lib/skatteverket/tax-payment.ts) so a
+  // file and a directly-sent payment can never name different amounts.
+  const totalAmount = resolveDeclaredTaxTotal(agi)
   if (totalAmount <= 0) {
     return NextResponse.json(
       { error: `Inget belopp att betala för perioden ${period}.` },
@@ -245,15 +240,3 @@ export const GET = withRouteContext<{ params: Promise<{ period: string }> }>(
   },
   { requireWrite: true },
 )
-
-/**
- * Tax payment deadline = the 12th of the month *following* the AGI period.
- * (Skatteverket also accepts the 17th in Jan/Aug for turnover ≤40 MSEK, but
- * the conservative date is the 12th: money must be on the Skattekonto by
- * then to avoid kostnadsränta.)
- */
-function computeTaxPaymentDate(periodYear: number, periodMonth: number): string {
-  const deadlineMonth = periodMonth === 12 ? 1 : periodMonth + 1
-  const deadlineYear = periodMonth === 12 ? periodYear + 1 : periodYear
-  return `${deadlineYear}-${String(deadlineMonth).padStart(2, '0')}-12`
-}

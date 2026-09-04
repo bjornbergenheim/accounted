@@ -34,6 +34,7 @@ import {
   type PayslipZipAttempt,
 } from '@/lib/salary/payslip-zip-report'
 import { getErrorMessage } from '@/lib/errors/get-error-message'
+import { effectiveNetPayout } from '@/lib/salary/payment/effective-net'
 import { AGIPanel } from '@/components/salary/AGIPanel'
 import { PaymentFilePanel } from '@/components/salary/PaymentFilePanel'
 import { TaxPaymentPanel } from '@/components/salary/TaxPaymentPanel'
@@ -892,6 +893,8 @@ export default function SalaryRunPage({ params }: { params: Promise<{ id: string
         <PaymentFilePanel
           salaryRunId={id}
           periodLabel={periodLabel}
+          payoutTotal={run.total_net ?? 0}
+          payoutCount={employees.filter((e) => effectiveNetPayout(e) > 0).length}
           paymentFileFormat={run.payment_file_format}
           paymentFileGeneratedAt={run.payment_file_generated_at}
           defaultFormat={preferredPaymentFormat}
@@ -924,6 +927,7 @@ export default function SalaryRunPage({ params }: { params: Promise<{ id: string
             defaultFormat={preferredPaymentFormat}
             senderBankgiro={senderBankgiro}
             senderIban={senderIban}
+            returnPath={`/salary/runs/${id}`}
             readOnly={!canWrite}
             onChange={loadRun}
           />

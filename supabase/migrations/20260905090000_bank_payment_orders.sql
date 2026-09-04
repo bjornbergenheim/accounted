@@ -69,6 +69,12 @@ CREATE TABLE public.bank_payment_orders (
   -- CSRF/lookup handle echoed back on the bank's redirect. Same role as
   -- bank_connections.oauth_state.
   oauth_state              text UNIQUE,
+  -- Where to send the user after signing, as a path on this instance. The bank
+  -- always redirects to ONE fixed callback URL (the one whitelisted at Enable
+  -- Banking), so the order is the only thing that knows which screen the
+  -- payment was started from. Stored, not derived: a salary run and a tax
+  -- period both live under a run id the source_id does not carry.
+  return_path              text,
 
   status                   text NOT NULL DEFAULT 'draft' CHECK (status IN (
                              'draft',
@@ -232,6 +238,7 @@ BEGIN
      OR NEW.requested_execution_date IS DISTINCT FROM OLD.requested_execution_date
      OR NEW.request_snapshot IS DISTINCT FROM OLD.request_snapshot
      OR NEW.oauth_state IS DISTINCT FROM OLD.oauth_state
+     OR NEW.return_path IS DISTINCT FROM OLD.return_path
      OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
     RAISE EXCEPTION 'bank_payment_orders are immutable snapshots: only lifecycle and status metadata may change';
   END IF;
@@ -332,6 +339,7 @@ CREATE OR REPLACE FUNCTION public.create_bank_payment_order(
   p_bank_connection_id       uuid,
   p_request_snapshot         jsonb,
   p_oauth_state              text,
+  p_return_path              text,
   p_items                    jsonb,
   p_user_id                  uuid DEFAULT NULL
 )
@@ -402,12 +410,12 @@ BEGIN
   INSERT INTO public.bank_payment_orders
     (id, company_id, user_id, bank_connection_id, aspsp_name, aspsp_country, psu_type,
      source_type, source_id, payment_type, currency, total_amount, item_count,
-     requested_execution_date, request_snapshot, oauth_state, status)
+     requested_execution_date, request_snapshot, oauth_state, return_path, status)
   VALUES
     (p_order_id, p_company_id, v_actor, p_bank_connection_id, p_aspsp_name,
      COALESCE(p_aspsp_country, 'SE'), p_psu_type, p_source_type, p_source_id, p_payment_type,
      COALESCE(p_currency, 'SEK'), v_total, v_count, p_requested_execution_date,
-     p_request_snapshot, p_oauth_state, 'draft')
+     p_request_snapshot, p_oauth_state, p_return_path, 'draft')
   RETURNING * INTO v_order;
 
   INSERT INTO public.bank_payment_order_items
@@ -435,7 +443,7 @@ BEGIN
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.create_bank_payment_order(uuid, uuid, text, text, text, text, text, text, text, date, uuid, jsonb, text, jsonb, uuid) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION public.create_bank_payment_order(uuid, uuid, text, text, text, text, text, text, text, date, uuid, jsonb, text, jsonb, uuid) TO authenticated, service_role;
+REVOKE ALL ON FUNCTION public.create_bank_payment_order(uuid, uuid, text, text, text, text, text, text, text, date, uuid, jsonb, text, text, jsonb, uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.create_bank_payment_order(uuid, uuid, text, text, text, text, text, text, text, date, uuid, jsonb, text, text, jsonb, uuid) TO authenticated, service_role;
 
 NOTIFY pgrst, 'reload schema';

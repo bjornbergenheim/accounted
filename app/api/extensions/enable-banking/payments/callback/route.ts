@@ -27,10 +27,28 @@ import type { BankPaymentOrder } from '@/types'
 // stated so a slow ASPSP status call cannot truncate the redirect.
 export const maxDuration = 60
 
+/**
+ * Fallback per source type, for orders written before return_path existed or
+ * whose stored path fails the safety check below.
+ */
 const RETURN_PATHS: Record<string, string> = {
   supplier_batch: '/supplier-invoices/payment-files',
-  tax_payment: '/skattekonto',
+  tax_payment: '/salary',
   salary_run: '/salary',
+}
+
+/**
+ * A stored return path is only ever used when it is unmistakably a path on this
+ * instance: one leading slash, no scheme, no protocol-relative "//host" form.
+ * The value was written by our own code, but this redirect is reached from an
+ * external referrer, and an open redirect at the end of a payment flow is
+ * exactly the phishing surface not to leave open.
+ */
+function safeReturnPath(candidate: string | null, fallback: string): string {
+  if (!candidate) return fallback
+  if (!candidate.startsWith('/') || candidate.startsWith('//')) return fallback
+  if (candidate.includes('\\') || /[\x00-\x1f]/.test(candidate)) return fallback
+  return candidate
 }
 
 function redirectTo(request: Request, path: string, params: Record<string, string>): NextResponse {
@@ -82,7 +100,10 @@ export async function GET(request: Request) {
     })
   }
 
-  const returnPath = RETURN_PATHS[order.source_type] ?? '/supplier-invoices/payment-files'
+  const returnPath = safeReturnPath(
+    order.return_path,
+    RETURN_PATHS[order.source_type] ?? '/supplier-invoices/payment-files',
+  )
 
   // The person who comes back must be the person who sent the payment. Anything
   // else is either a stale link in someone else's browser or an attempt to

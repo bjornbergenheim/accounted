@@ -82,12 +82,13 @@ async function callCreate(params: {
     null,
     JSON.stringify({ payment_type: 'DOMESTIC_SE_GIRO' }),
     randomUUID(),
+    '/supplier-invoices/payment-files',
     JSON.stringify(params.items),
     params.userId ?? null,
   ]
   const sql = `SELECT public.create_bank_payment_order(
     $1::uuid, $2::uuid, $3::text, $4::text, $5::text, $6::text, $7::text, $8::text,
-    $9::text, $10::date, $11::uuid, $12::jsonb, $13::text, $14::jsonb, $15::uuid
+    $9::text, $10::date, $11::uuid, $12::jsonb, $13::text, $14::text, $15::jsonb, $16::uuid
   ) AS result`
 
   if (params.asUser) {
@@ -331,13 +332,22 @@ describe('uq_bank_payment_orders_live_source', () => {
 })
 
 describe('enforce_bank_payment_order_immutability', () => {
-  it('refuses to rewrite the amount or the request snapshot', async () => {
+  it('refuses to rewrite the amount, the request snapshot or the return path', async () => {
     const ctx = await seedOrder()
 
     await expect(
       getPool().query(`UPDATE public.bank_payment_orders SET total_amount = 1 WHERE id = $1`, [
         ctx.orderId,
       ]),
+    ).rejects.toThrow(/immutable snapshots/)
+
+    // The return path is where the user is redirected after signing at the
+    // bank: repointing it after the fact is an open-redirect primitive.
+    await expect(
+      getPool().query(
+        `UPDATE public.bank_payment_orders SET return_path = '//evil.example' WHERE id = $1`,
+        [ctx.orderId],
+      ),
     ).rejects.toThrow(/immutable snapshots/)
 
     await expect(

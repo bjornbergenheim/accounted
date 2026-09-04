@@ -22,7 +22,12 @@ import {
   refreshOrderStatus,
   resolveOrderBankIdentity,
 } from './lib/payment-orders'
-import { loadSupplierBatchSource } from './lib/payment-sources'
+import {
+  loadSalaryRunSource,
+  loadSupplierBatchSource,
+  loadTaxPaymentSource,
+} from './lib/payment-sources'
+import type { BankPaymentOrderSourceType } from '@/types'
 import {
   runUnattendedReconciliationSweep,
   toSweepSummary,
@@ -54,6 +59,28 @@ const MAX_ENABLED_UIDS = 50
 
 /** Roles allowed to move money. Viewers may look at orders, never create one. */
 const PAYMENT_WRITE_ROLES = new Set(['owner', 'admin', 'member'])
+
+/**
+ * Where the user lands after signing, when the caller does not say.
+ *
+ * The bank redirects to ONE fixed callback URL for every payment, so the order
+ * carries the screen it was started from. The salary and tax panels both live
+ * under a salary run, whose id the source_id does not carry for the tax case,
+ * which is why the client sends its own path and this is only the fallback.
+ */
+const PAYMENT_RETURN_PATHS: Record<BankPaymentOrderSourceType, string> = {
+  supplier_batch: '/supplier-invoices/payment-files',
+  tax_payment: '/salary',
+  salary_run: '/salary',
+}
+
+/** Accept a client-supplied return path only when it is a plain local path. */
+function safeClientReturnPath(candidate: unknown, fallback: string): string {
+  if (typeof candidate !== 'string') return fallback
+  if (!candidate.startsWith('/') || candidate.startsWith('//')) return fallback
+  if (candidate.length > 512 || candidate.includes('\\')) return fallback
+  return candidate
+}
 
 /**
  * Defense-in-depth RBAC for the payment routes. The extension dispatcher
@@ -2033,26 +2060,44 @@ export const enableBankingExtension: Extension = {
           )
         }
 
-        let body: { source_type?: string; source_id?: string }
+        let body: { source_type?: string; source_id?: string; return_path?: string }
         try {
           body = await request.json()
         } catch {
           return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
         }
 
-        // v1 pays supplier batches. The tax and salary sources land next and
-        // reuse everything below unchanged.
-        if (body.source_type !== 'supplier_batch' || !body.source_id) {
+        const sourceType = body.source_type
+        if (
+          !body.source_id ||
+          (sourceType !== 'supplier_batch' &&
+            sourceType !== 'tax_payment' &&
+            sourceType !== 'salary_run')
+        ) {
           return NextResponse.json(
-            { error: 'source_type must be supplier_batch and source_id is required' },
+            {
+              error:
+                'source_type must be supplier_batch, tax_payment or salary_run, and source_id is required',
+            },
             { status: 400 },
           )
         }
 
-        const loaded = await loadSupplierBatchSource(ctx.supabase, ctx.companyId, body.source_id)
+        // Supplier invoices and the Skatteverket payment address giro numbers;
+        // salary pays employees' own accounts, which is a different payment
+        // family at the bank (BBAN creditors, no remittance information).
+        const family = sourceType === 'salary_run' ? 'domestic' : 'giro'
+
+        const loaded =
+          sourceType === 'supplier_batch'
+            ? await loadSupplierBatchSource(ctx.supabase, ctx.companyId, body.source_id)
+            : sourceType === 'tax_payment'
+              ? await loadTaxPaymentSource(ctx.supabase, ctx.companyId, body.source_id)
+              : await loadSalaryRunSource(ctx.supabase, ctx.companyId, body.source_id)
+
         if (!loaded.ok) {
           return NextResponse.json(
-            { error: 'batch_' + loaded.reason, code: loaded.reason },
+            { error: `source_${loaded.reason}`, code: loaded.reason, detail: loaded.detail },
             { status: loaded.reason === 'not_found' ? 404 : 400 },
           )
         }
@@ -2061,13 +2106,13 @@ export const enableBankingExtension: Extension = {
           supabase: ctx.supabase,
           companyId: ctx.companyId,
           userId: ctx.userId,
-          sourceType: 'supplier_batch',
+          sourceType,
           sourceId: body.source_id,
-          family: 'giro',
+          family,
           instructions: loaded.source.instructions,
           debtor: loaded.source.debtor,
           origin: appUrl,
-          returnPath: '/supplier-invoices/payment-files',
+          returnPath: safeClientReturnPath(body.return_path, PAYMENT_RETURN_PATHS[sourceType]),
         })
 
         if (!result.ok) {

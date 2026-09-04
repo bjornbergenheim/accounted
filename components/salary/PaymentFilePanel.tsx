@@ -14,12 +14,18 @@ import { downloadFile } from '@/lib/browser/download-file'
 import { failureDescription } from '@/lib/browser/action-failure'
 import { cn, formatDateTime } from '@/lib/utils'
 import type { ErrorLocale } from '@/lib/errors/get-error-message'
+import { useBankPayments } from '@/components/payments/use-bank-payments'
+import { SendToBankAction } from '@/components/payments/SendToBankAction'
 
 type PaymentFormat = 'bg_lb' | 'pain001'
 
 interface PaymentFilePanelProps {
   salaryRunId: string
   periodLabel: string
+  /** Total net to be paid out, for the send-to-bank confirmation. */
+  payoutTotal?: number
+  /** Number of employees with a positive payout, same selection as the file. */
+  payoutCount?: number
   paymentFileFormat: string | null
   paymentFileGeneratedAt: string | null
   defaultFormat: PaymentFormat
@@ -57,6 +63,8 @@ const BANKS_BY_FORMAT: Record<PaymentFormat, BankKey[]> = {
 export function PaymentFilePanel({
   salaryRunId,
   periodLabel,
+  payoutTotal = 0,
+  payoutCount = 0,
   paymentFileFormat,
   paymentFileGeneratedAt,
   defaultFormat,
@@ -71,6 +79,12 @@ export function PaymentFilePanel({
   const { toast } = useToast()
   const [format, setFormat] = useState<PaymentFormat>(defaultFormat)
   const [downloading, setDownloading] = useState(false)
+  // The salary run is the source id: one live payment order per run, which is
+  // what stops a month's wages being sent twice.
+  const payments = useBankPayments({
+    sourceType: 'salary_run',
+    returnPath: `/salary/runs/${salaryRunId}`,
+  })
 
   const banks = BANKS_BY_FORMAT[format]
   const matchedBank = banks.find((b) => b === defaultBank) ?? null
@@ -226,6 +240,17 @@ export function PaymentFilePanel({
               />
               {t('instructions_toggle')}
             </button>
+            {/* Payment initiation: renders nothing unless the instance has it
+                switched on, so the download stays the only path by default.
+                Sending books nothing and does not mark the run paid. */}
+            <SendToBankAction
+              payments={payments}
+              sourceId={salaryRunId}
+              sourceIsOpen={payoutCount > 0}
+              amount={payoutTotal}
+              itemCount={payoutCount}
+              canWrite={!readOnly}
+            />
             <Button onClick={handleDownload} disabled={downloading}>
               {downloading ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

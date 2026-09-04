@@ -196,6 +196,7 @@ export async function createAndSendOrder(input: CreateOrderInput): Promise<Order
     p_bank_connection_id: identity.connectionId,
     p_request_snapshot: built.request,
     p_oauth_state: state,
+    p_return_path: input.returnPath,
     p_items: instructions.map((instruction) => toItemRow(instruction)),
     p_user_id: userId,
   })

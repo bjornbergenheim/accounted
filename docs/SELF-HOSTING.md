@@ -373,7 +373,9 @@ ENABLE_BANKING_PRIVATE_KEY=...                         # the application's priva
 
 The `_PRODUCTION` variants (`ENABLE_BANKING_APP_ID_PRODUCTION`, `ENABLE_BANKING_PRIVATE_KEY_PRODUCTION`, `ENABLE_BANKING_API_URL_PRODUCTION`) win over the plain names when both are set. Setting any one of the four id/key variables switches the bank upstream out of connector mode, so always set the id and the key as a pair: a lone `ENABLE_BANKING_APP_ID` leaves you with neither the connector nor a working own client.
 
-**Betalningsinitiering (PIS): sending payments instead of downloading a betalfil.** Off by default. Turning it on lets an approved supplier payment batch be handed straight to your bank and signed with BankID, instead of being downloaded as a pain.001 file and uploaded in your internet bank. Nothing about the file path changes: the download stays, and a sent payment still books nothing (settlement remains bank matching / mark-as-paid, exactly as before).
+**Betalningsinitiering (PIS): sending payments instead of downloading a betalfil.** Off by default. Turning it on lets a payment be handed straight to your bank and signed with BankID, instead of being downloaded as a file and uploaded in your internet bank. Three surfaces have it: a supplier payment batch (betalfil), the skattekonto payment for an AGI period, and a salary run's payouts. Nothing about the file path changes: every download stays exactly where it was, and a sent payment still books nothing (settlement remains bank matching / mark-as-paid, exactly as before). A salary run is not marked paid by sending it either; that stays your decision.
+
+Each source can have at most one payment order in flight, and a completed one keeps blocking, so the same batch, period or salary run cannot be paid twice by accident. If a send fails in a way that does not prove the bank refused it (a timeout, a 5xx), the order is parked as "okänd status" and keeps blocking until you confirm in your internet bank and cancel it: the alternative would be inviting the retry that pays twice.
 
 Three things must all be true, and the app tells you which one is missing:
 

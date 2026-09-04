@@ -1057,6 +1057,8 @@ export interface BankPaymentOrder {
   eb_payment_id: string | null
   auth_url: string | null
   oauth_state: string | null
+  /** Path on this instance to return to after signing. */
+  return_path: string | null
   status: BankPaymentOrderStatus
   /** Raw bank status code: RCVD, ACCP, ACSC, RJCT, ... */
   eb_status: string | null

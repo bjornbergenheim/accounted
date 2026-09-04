@@ -23,6 +23,8 @@ vi.mock('../lib/payment-orders', async (importOriginal) => {
 })
 vi.mock('../lib/payment-sources', () => ({
   loadSupplierBatchSource: vi.fn(),
+  loadTaxPaymentSource: vi.fn(),
+  loadSalaryRunSource: vi.fn(),
 }))
 
 import { enableBankingExtension } from '../index'
@@ -33,7 +35,11 @@ import {
   resolvePisAvailability,
 } from '../lib/payment-capabilities'
 import { createAndSendOrder, resolveOrderBankIdentity } from '../lib/payment-orders'
-import { loadSupplierBatchSource } from '../lib/payment-sources'
+import {
+  loadSalaryRunSource,
+  loadSupplierBatchSource,
+  loadTaxPaymentSource,
+} from '../lib/payment-sources'
 import type { ExtensionContext } from '@/lib/extensions/types'
 
 const BATCH_ID = '11111111-1111-4111-8111-111111111111'
@@ -191,10 +197,152 @@ describe('POST /payments/orders', () => {
 
   it('rejects an unsupported source type', async () => {
     const response = await route('POST', '/payments/orders').handler(
+      postOrders({ source_type: 'invented', source_id: BATCH_ID }),
+      makeContext(),
+    )
+    expect(response.status).toBe(400)
+    expect(createAndSendOrder).not.toHaveBeenCalled()
+  })
+
+  it('rejects a request with no source id', async () => {
+    const response = await route('POST', '/payments/orders').handler(
+      postOrders({ source_type: 'supplier_batch' }),
+      makeContext(),
+    )
+    expect(response.status).toBe(400)
+    expect(createAndSendOrder).not.toHaveBeenCalled()
+  })
+
+  it('routes a tax payment through the giro family', async () => {
+    vi.mocked(loadTaxPaymentSource).mockResolvedValue({
+      ok: true,
+      source: {
+        instructions: [
+          {
+            payee: { type: 'bankgiro', bankgiro: '50501055' },
+            payeeName: 'Skatteverket',
+            amount: 21426,
+            paymentDate: '2026-09-12',
+            reference: { type: 'ocr', value: '1234567890123' },
+          },
+        ],
+        debtor: { name: 'Testbolaget AB' },
+        label: 'Skatt och avgifter 2026-08',
+      },
+    })
+    vi.mocked(createAndSendOrder).mockResolvedValue({
+      ok: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      order: { id: 'order-1' } as any,
+      authUrl: 'https://auth.enablebanking.com/pis/start',
+    })
+
+    const response = await route('POST', '/payments/orders').handler(
+      postOrders({ source_type: 'tax_payment', source_id: '2026-08' }),
+      makeContext(),
+    )
+    expect(response.status).toBe(200)
+
+    const args = vi.mocked(createAndSendOrder).mock.calls[0][0]
+    expect(args).toMatchObject({
+      sourceType: 'tax_payment',
+      sourceId: '2026-08',
+      family: 'giro',
+      // No return_path in the body: the per-source-type fallback applies.
+      returnPath: '/salary',
+    })
+    expect(loadSupplierBatchSource).not.toHaveBeenCalled()
+  })
+
+  it('carries the client return path, but only when it is a plain local path', async () => {
+    vi.mocked(loadSupplierBatchSource).mockResolvedValue({
+      ok: true,
+      source: {
+        instructions: [
+          {
+            payee: { type: 'bankgiro', bankgiro: '50501055' },
+            payeeName: 'Leverantör AB',
+            amount: 100,
+            paymentDate: '2026-09-12',
+          },
+        ],
+        debtor: { name: 'Testbolaget AB' },
+        label: 'Betalfil',
+      },
+    })
+    vi.mocked(createAndSendOrder).mockResolvedValue({
+      ok: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      order: { id: 'order-1' } as any,
+      authUrl: 'https://auth.enablebanking.com/pis/start',
+    })
+
+    await route('POST', '/payments/orders').handler(
+      postOrders({
+        source_type: 'supplier_batch',
+        source_id: BATCH_ID,
+        return_path: '/salary/runs/run-1',
+      }),
+      makeContext(),
+    )
+    expect(vi.mocked(createAndSendOrder).mock.calls[0][0].returnPath).toBe('/salary/runs/run-1')
+
+    vi.mocked(createAndSendOrder).mockClear()
+    await route('POST', '/payments/orders').handler(
+      postOrders({
+        source_type: 'supplier_batch',
+        source_id: BATCH_ID,
+        return_path: '//evil.example/pwn',
+      }),
+      makeContext(),
+    )
+    expect(vi.mocked(createAndSendOrder).mock.calls[0][0].returnPath).toBe(
+      '/supplier-invoices/payment-files',
+    )
+  })
+
+  it('routes a salary run through the domestic family: employees are paid on accounts, not giro', async () => {
+    vi.mocked(loadSalaryRunSource).mockResolvedValue({
+      ok: true,
+      source: {
+        instructions: [
+          {
+            payee: { type: 'bank_account', clearing: '8327', account: '123456789' },
+            payeeName: 'Anna Andersson',
+            amount: 24000,
+            paymentDate: '2026-09-25',
+          },
+        ],
+        debtor: { name: 'Testbolaget AB' },
+        label: 'Löner 2026-09',
+      },
+    })
+    vi.mocked(createAndSendOrder).mockResolvedValue({
+      ok: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      order: { id: 'order-1' } as any,
+      authUrl: 'https://auth.enablebanking.com/pis/start',
+    })
+
+    const response = await route('POST', '/payments/orders').handler(
+      postOrders({ source_type: 'salary_run', source_id: BATCH_ID }),
+      makeContext(),
+    )
+    expect(response.status).toBe(200)
+
+    const args = vi.mocked(createAndSendOrder).mock.calls[0][0]
+    expect(args).toMatchObject({ sourceType: 'salary_run', family: 'domestic', returnPath: '/salary' })
+  })
+
+  it('surfaces an unapproved salary run as a 400 with its own code', async () => {
+    vi.mocked(loadSalaryRunSource).mockResolvedValue({ ok: false, reason: 'not_approved' })
+
+    const response = await route('POST', '/payments/orders').handler(
       postOrders({ source_type: 'salary_run', source_id: BATCH_ID }),
       makeContext(),
     )
     expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({ code: 'not_approved' })
     expect(createAndSendOrder).not.toHaveBeenCalled()
   })
 
