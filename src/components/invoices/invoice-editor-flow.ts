@@ -11,6 +11,8 @@ import { foldText } from '@/lib/bookkeeping/account-search'
  *     never round-trips values the user cannot see.
  *   - planDueDateSync: keeps förfallodatum on the same payment term when the
  *     user moves fakturadatum, instead of leaving them to count days by hand.
+ *   - planCustomerTermsFill: the same term, filled from the picked customer's
+ *     default and counted from the invoice date on the form.
  *   - filterArticleSuggestions: the unified row entry's autocomplete filter
  *     (diacritics-folded, matches name and article number, same folding as
  *     ArticleCombobox).
@@ -266,6 +268,40 @@ export function planDueDateSync(input: DueDateSyncInput): DueDateSyncResult {
     terms,
     previousInvoiceDate: invoiceDate,
   }
+}
+
+export interface CustomerTermsFillInput {
+  /** Fakturadatum as the form holds it now (yyyy-MM-dd, may be empty). */
+  invoiceDate: string
+  /** The picked customer's default_payment_terms, in days. */
+  terms: number
+  /** Today as yyyy-MM-dd: the anchor of last resort. */
+  today: string
+}
+
+export interface CustomerTermsFillResult {
+  /** The due date to write. */
+  dueDate: string
+  /** The term planDueDateSync must carry from here on. */
+  terms: number
+}
+
+/**
+ * Picking a customer fills förfallodatum from that customer's payment term,
+ * counted from the invoice date the form is actually on: choosing a customer
+ * after setting fakturadatum to the 31st must give the 31st + terms, not
+ * today + terms. Today is the anchor only while fakturadatum is empty or
+ * half-typed, which is also why the term comes back out of here: the sync
+ * baseline reads a term off the date pair on screen, and with no valid invoice
+ * date there is no pair to read, so this fill is the only thing that knows it.
+ * Without that, a 14 day customer picked on a cleared fakturadatum would be
+ * overwritten by the previous 30 day term on the next date the user types.
+ */
+export function planCustomerTermsFill(input: CustomerTermsFillInput): CustomerTermsFillResult {
+  const { invoiceDate, terms, today } = input
+  const anchor = parseISO(invoiceDate)
+  const base = invoiceDate && isValid(anchor) ? anchor : parseISO(today)
+  return { dueDate: format(addDays(base, terms), 'yyyy-MM-dd'), terms }
 }
 
 export interface ArticleSuggestion {

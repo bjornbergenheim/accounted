@@ -7,6 +7,7 @@ import {
   isComposingKey,
   resolveEntryKey,
   planDueDateSync,
+  planCustomerTermsFill,
   type NextStepInput,
   type ForvalChipsInput,
 } from '@/components/invoices/invoice-editor-flow'
@@ -363,6 +364,46 @@ describe('planDueDateSync', () => {
     const first = sync(fresh, '2026-12-15', '2027-01-14')
     expect(first.state.terms).toBe(30)
     expect(sync(first.state, '2026-12-31', '2027-01-14').plan.dueDate).toBe('2027-01-30')
+  })
+
+  describe('with a customer term filled in between', () => {
+    // The customer fill is the other writer of förfallodatum, so the two are
+    // tested together: fill, then feed its result back into the sync.
+    it('counts the customer term from the invoice date on the form', () => {
+      const first = sync(fresh, '2026-09-30', '2026-10-30')
+      const fill = planCustomerTermsFill({
+        invoiceDate: '2026-09-30',
+        terms: 14,
+        today: '2026-09-04',
+      })
+      // Not today + 14 (2026-09-18), which was the reported second bug.
+      expect(fill.dueDate).toBe('2026-10-14')
+      const after = sync({ ...first.state, terms: fill.terms }, '2026-09-30', fill.dueDate)
+      expect(after.state.terms).toBe(14)
+    })
+
+    it('keeps the customer term when fakturadatum was empty at the time', () => {
+      // Clear fakturadatum, pick a 14 day customer, then type a date. The
+      // fill had no anchor to count from and the sync had no pair to read a
+      // term off, so without the fill handing its term over the next date
+      // would have been given the previous 30 day term.
+      const first = sync(fresh, '2026-09-04', '2026-10-04')
+      const cleared = sync(first.state, '', '2026-10-04')
+      const fill = planCustomerTermsFill({ invoiceDate: '', terms: 14, today: '2026-09-04' })
+      expect(fill.dueDate).toBe('2026-09-18')
+      const typed = sync({ ...cleared.state, terms: fill.terms }, '2026-09-30', fill.dueDate)
+      expect(typed.plan.dueDate).toBe('2026-10-14')
+      expect(typed.state.terms).toBe(14)
+    })
+
+    it('falls back to today only when the invoice date cannot be parsed', () => {
+      expect(
+        planCustomerTermsFill({ invoiceDate: '2026-13-45', terms: 30, today: '2026-09-04' }).dueDate
+      ).toBe('2026-10-04')
+      expect(
+        planCustomerTermsFill({ invoiceDate: '2026-0', terms: 30, today: '2026-09-04' }).dueDate
+      ).toBe('2026-10-04')
+    })
   })
 })
 
