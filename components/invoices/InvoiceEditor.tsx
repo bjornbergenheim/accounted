@@ -10,7 +10,7 @@ import { SortableRow } from '@/components/ui/sortable-row'
 import { AutoGrowTextarea } from '@/components/invoices/AutoGrowTextarea'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { addDays, format, isValid as isValidDate, parseISO } from 'date-fns'
+import { addDays, format } from 'date-fns'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { TagInput } from '@/components/ui/tag-input'
@@ -38,6 +38,7 @@ import {
   type EntryGhostCell,
   type EntryKeyAction,
   planDueDateSync,
+  planCustomerTermsFill,
   type NextStep,
 } from '@/components/invoices/invoice-editor-flow'
 import { sortArticles } from '@/lib/articles/sort'
@@ -1322,16 +1323,17 @@ export default function InvoiceEditor(props: InvoiceEditorProps = { mode: 'creat
           // Update due date based on customer payment terms, counted from the
           // invoice date the form is actually on: picking a customer after
           // setting fakturadatum to the 31st must give the 31st + terms, not
-          // today + terms.
+          // today + terms. This fill is the second writer of due_date, and the
+          // only one that knows a term the date pair cannot show (fakturadatum
+          // may be empty here), so it hands that term to the sync baseline.
           if (customer.default_payment_terms) {
-            const anchor = parseISO(getValues('invoice_date') || '')
-            setValue(
-              'due_date',
-              format(
-                addDays(isValidDate(anchor) ? anchor : new Date(), customer.default_payment_terms),
-                'yyyy-MM-dd'
-              )
-            )
+            const fill = planCustomerTermsFill({
+              invoiceDate: getValues('invoice_date') || '',
+              terms: customer.default_payment_terms,
+              today: format(new Date(), 'yyyy-MM-dd'),
+            })
+            setValue('due_date', fill.dueDate)
+            dueDateSyncRef.current = { ...dueDateSyncRef.current, terms: fill.terms }
           }
 
           // Move only the lines still sitting on the OLD customer's default
