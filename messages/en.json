@@ -5939,6 +5939,7 @@
     "select_row_aria": "Select account {number}",
     "usage_filter_label": "Filter by vouchers",
     "usage_filter_all": "All accounts",
+    "usage_link_aria": "Show {count, plural, =1 {1 voucher} other {# vouchers}} on account {number} in the general ledger",
     "usage_filter_unused": "Without vouchers",
     "usage_filter_used": "With vouchers",
     "bulkbar_selected": "{count, plural, one {account selected} other {accounts selected}}",

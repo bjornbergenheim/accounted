@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import Link from 'next/link'
 import { useTranslations } from 'next-intl'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -66,6 +67,32 @@ const USAGE_FILTER_KEY = {
   unused: 'usage_filter_unused',
   used: 'usage_filter_used',
 } as const
+
+/**
+ * The verifikat count, as the way into the ledger behind it.
+ *
+ * The count answered "how many" and left the reader to open Huvudbok and pick
+ * the account again to see which. The deep link it needs already existed:
+ * /reports/huvudbok?account= is the drill-down the reports use (FocusedReport)
+ * and the reconciliation overview links to. This column was the one place
+ * naming a per-account count without using it.
+ *
+ * No count, no link. An account never posted to has an empty ledger, and a
+ * link that lands on nothing costs more trust than the missing link saves.
+ */
+function UsageCount({ accountNumber, count }: { accountNumber: string; count: number | undefined }) {
+  const t = useTranslations('chart_of_accounts')
+  if (!count) return null
+  return (
+    <Link
+      href={`/reports/huvudbok?account=${encodeURIComponent(accountNumber)}`}
+      className={QUIET_LINK_CLASS}
+      aria-label={t('usage_link_aria', { count, number: accountNumber })}
+    >
+      {count}
+    </Link>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -780,7 +807,10 @@ export default function ChartOfAccountsManager() {
                                 {typeLabel(account.account_type)}
                               </td>
                               <td className={cn(TD_CLASS, 'hidden whitespace-nowrap text-right tabular-nums text-muted-foreground sm:table-cell')}>
-                                {usageCounts.get(account.account_number) ?? ''}
+                                <UsageCount
+                                  accountNumber={account.account_number}
+                                  count={usageCounts.get(account.account_number)}
+                                />
                               </td>
                               <td className={cn(TD_CLASS, 'whitespace-nowrap py-[9px]')}>
                                 <Switch
