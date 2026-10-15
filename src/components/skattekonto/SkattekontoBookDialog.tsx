@@ -17,6 +17,9 @@ import type {
   SkattekontoTransactionWithSuggestion,
 } from '@/types/skatteverket'
 
+/** How long the on-open twin probe may hold the confirm before it counts as failed. */
+const TWIN_PROBE_TIMEOUT_MS = 8000
+
 /** The twin fields of a match-candidates candidate (it carries more). */
 function toLedgerTwin(c: SkattekontoLedgerTwin): SkattekontoLedgerTwin {
   return {
@@ -99,11 +102,16 @@ export default function SkattekontoBookDialog({
   useEffect(() => {
     if (!open || !rowId) return
     let cancelled = false
+    // A hung probe must not hold the confirm forever: past the timeout it
+    // counts as failed, which leaves the ordinary dialog.
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), TWIN_PROBE_TIMEOUT_MS)
     setProbingRowId(rowId)
     void (async () => {
       try {
         const res = await fetch(
           `/api/extensions/ext/skatteverket/skattekonto/transaktioner/${rowId}/match-candidates`,
+          { signal: controller.signal },
         )
         const json = res.ok ? await res.json() : null
         const candidates: SkattekontoLedgerTwin[] = Array.isArray(json?.data?.candidates)
@@ -113,17 +121,20 @@ export default function SkattekontoBookDialog({
           setTwinRefusal({ rowId, twins: candidates.map(toLedgerTwin), mode: openMode })
         }
       } catch {
-        // A failed probe leaves the ordinary dialog; the server still refuses a twin.
+        // A failed or timed-out probe leaves the ordinary dialog; the server still refuses a twin.
       } finally {
+        clearTimeout(timer)
         if (!cancelled) setProbingRowId(null)
       }
     })()
     return () => {
       cancelled = true
+      clearTimeout(timer)
+      controller.abort()
+      // Closing mid-probe must not leave the row marked as probing.
+      setProbingRowId((current) => (current === rowId ? null : current))
     }
-    // openMode follows the row; re-probing is keyed on the row and on opening.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, rowId])
+  }, [open, rowId, openMode])
 
   if (!row) return null
   const isProbing = probingRowId === row.id
