@@ -10,6 +10,7 @@ import { AlertTriangle } from 'lucide-react'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { getErrorMessage, type ErrorLocale } from '@/lib/errors/get-error-message'
 import { resolveAccount } from '@/lib/cash-accounts/resolve-account'
+import { UUID_RE } from '@/lib/invariants/uuid'
 import type { BookedDuplicateCandidate } from '@/lib/transactions/booking-duplicate-detection'
 
 /** The bank transaction being booked, as much as the caller knows about it.
@@ -243,14 +244,18 @@ export default function DuplicateBookingDialog({
                   the primary action past the dialog's edge. */}
               <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span className="tabular-nums">{formatDate(candidate.entry_date)}</span>
-                <a
-                  href={`/bookkeeping/${candidate.journal_entry_id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline underline-offset-2 hover:text-foreground"
-                >
-                  {t('dialog_duplicate_view_voucher')}
-                </a>
+                {/* The id reaches here from an error envelope's details:
+                    only a well-formed UUID becomes a link target. */}
+                {UUID_RE.test(candidate.journal_entry_id) && (
+                  <a
+                    href={`/bookkeeping/${candidate.journal_entry_id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline underline-offset-2 hover:text-foreground"
+                  >
+                    {t('dialog_duplicate_view_voucher')}
+                  </a>
+                )}
               </div>
               {candidate.description && (
                 <div className="truncate text-xs text-muted-foreground">{candidate.description}</div>
