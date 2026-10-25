@@ -163,6 +163,9 @@ const TransactionAttachDocumentDialog = dynamic(
   { loading: DialogLoadingSkeleton },
 )
 const QuickReviewDialog = dynamic(() => import('@/components/transactions/QuickReviewDialog'), { loading: DialogLoadingSkeleton })
+
+/** How long the ledger-twin probe may hold a row's Bokför before it counts as failed (askTwinFirst). */
+const TWIN_PROBE_TIMEOUT_MS = 8000
 const EditTransactionTitleDialog = dynamic(
   () => import('@/components/transactions/EditTransactionTitleDialog'),
   { loading: DialogLoadingSkeleton },
@@ -637,6 +640,10 @@ export default function TransactionsPage() {
     candidate: BookedDuplicateCandidate
   } | null>(null)
   const [duplicateProcessing, setDuplicateProcessing] = useState(false)
+  // A twin the user already answered "Bokför ändå" to when the row opened
+  // (askTwinFirst), keyed by transaction id: the booking that follows carries
+  // force bound to it, so the same question is not asked twice.
+  const acknowledgedTwinRef = useRef(new Map<string, string>())
 
   // The same guard, asked once for a whole batch (#2488). The slot above holds
   // ONE answer, so N rows booking in parallel wrote it N times: only the last
@@ -4055,7 +4062,44 @@ export default function TransactionsPage() {
     setMatchDialogOpen(true)
   }
 
+  // Before a row opens any booking flow, ask the booking guard whether the
+  // affärshändelse is already in the ledger (a salary payout the run booked,
+  // an invoice marked paid). Asked only at submit, the answer came after a
+  // template proposal and a missing-underlag warning had both invited a
+  // second verifikat. A twin opens the duplicate dialog instead: Koppla links
+  // the row, Bokför ändå continues into the flow with the twin acknowledged.
+  // A failed or slow probe leaves the ordinary flow; the server still guards.
+  async function askTwinFirst(transaction: TransactionWithInvoice, proceed: () => void) {
+    if (processingId === transaction.id) return
+    setProcessingId(transaction.id)
+    let candidate: BookedDuplicateCandidate | null = null
+    try {
+      const res = await fetch(`/api/transactions/${transaction.id}/booking-duplicate-check`, {
+        signal: AbortSignal.timeout(TWIN_PROBE_TIMEOUT_MS),
+      })
+      if (res.ok) candidate = ((await res.json()) as { candidate: BookedDuplicateCandidate | null }).candidate
+    } catch {
+      // Timed out or offline: the ordinary flow, guarded at submit.
+    } finally {
+      setProcessingId(null)
+    }
+    if (!candidate) return proceed()
+    const twin = candidate
+    setDuplicateWarning({
+      transactionId: transaction.id,
+      candidate: twin,
+      retry: async () => {
+        acknowledgedTwinRef.current.set(transaction.id, twin.journal_entry_id)
+        proceed()
+      },
+    })
+  }
+
   function openCategoryDialog(transaction: TransactionWithInvoice, anchor?: HTMLElement) {
+    void askTwinFirst(transaction, () => openCategoryDialogUnchecked(transaction, anchor))
+  }
+
+  function openCategoryDialogUnchecked(transaction: TransactionWithInvoice, anchor?: HTMLElement) {
     setTemplatePickerTransaction(transaction)
     setTemplatePickerAnchor(anchor ?? null)
     // Opened from the row, not by "Byt": no review's underlag to carry.
@@ -4086,8 +4130,12 @@ export default function TransactionsPage() {
   // Bokför on a row that carries a proposal goes straight to the
   // review with that template set; no picker in between.
   function bookProposal(transaction: TransactionWithInvoice) {
+    void askTwinFirst(transaction, () => bookProposalUnchecked(transaction))
+  }
+
+  function bookProposalUnchecked(transaction: TransactionWithInvoice) {
     const s = rowProposal(templateSuggestions[transaction.id])
-    if (!s) return openCategoryDialog(transaction)
+    if (!s) return openCategoryDialogUnchecked(transaction)
     // A decision the company already made (a rule, a settled counterpart, a
     // sure read of a receipt) books from the row; Ångra sits on the toast.
     if (booksWithoutReview(s)) return void bookDirect(transaction, s)
@@ -4102,7 +4150,9 @@ export default function TransactionsPage() {
     extras: { dimensions?: Record<string, string>; vatAmount?: number; narration?: string } = {},
   ): Promise<{ ok: boolean; journalEntryId: string | null }> {
     const body = categorizeBodyFor(proposal, { dimensions: extras.dimensions, vatAmount: extras.vatAmount })
+    const acknowledgedTwin = acknowledgedTwinRef.current.get(transaction.id)
     return runCategorize({
+      ...(acknowledgedTwin ? { force: true, expectedDuplicateJournalEntryId: acknowledgedTwin } : {}),
       id: transaction.id,
       isBusiness: true,
       category: body.category,

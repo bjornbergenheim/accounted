@@ -150,7 +150,14 @@ describe('duplicate-guard 409 routing parity', () => {
     expect(PAGE_SRC).toMatch(
       /TRANSACTION_BOOK_POSSIBLE_DUPLICATE'[\s\S]{0,1600}if \(silent\) \{[\s\S]{0,600}batchDuplicatesRef\.current\.push\(\{ transactionId: id, candidate, retry \}\)/,
     )
-    expect(PAGE_SRC.match(/setDuplicateWarning\(\{/g) ?? []).toHaveLength(1)
+    // Two writers of the single-row slot: the 409 handler (non-silent rows
+    // only) and askTwinFirst, which runs on one row's Bokför click and is
+    // never reached from a batch.
+    expect(PAGE_SRC.match(/setDuplicateWarning\(\{/g) ?? []).toHaveLength(2)
+    expect(PAGE_SRC).toMatch(
+      /async function askTwinFirst\([\s\S]{0,1600}setDuplicateWarning\(\{/,
+    )
+    expect(PAGE_SRC).not.toMatch(/handleBatchCategorize[\s\S]{0,4000}askTwinFirst\(/)
   })
 
   it('gives a parked row its own outcome so the batch tally never calls it failed', () => {
