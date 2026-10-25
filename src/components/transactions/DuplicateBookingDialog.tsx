@@ -238,8 +238,19 @@ export default function DuplicateBookingDialog({
                     {formatCurrency(candidate.amount_in_currency, candidate.currency)}
                   </div>
                 )}
-              <div className="text-xs text-muted-foreground tabular-nums">
-                {formatDate(candidate.entry_date)}
+              {/* The voucher link sits with the voucher it opens: in the
+                  footer it made a fifth control on a 464px row, which pushed
+                  the primary action past the dialog's edge. */}
+              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span className="tabular-nums">{formatDate(candidate.entry_date)}</span>
+                <a
+                  href={`/bookkeeping/${candidate.journal_entry_id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  {t('dialog_duplicate_view_voucher')}
+                </a>
               </div>
               {candidate.description && (
                 <div className="truncate text-xs text-muted-foreground">{candidate.description}</div>
@@ -273,46 +284,35 @@ export default function DuplicateBookingDialog({
               )}
             </div>
           )}
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
-            {candidate && (
-              <Button asChild variant="ghost" size="sm" className="text-muted-foreground sm:mr-auto">
-                <a
-                  href={`/bookkeeping/${candidate.journal_entry_id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {t('dialog_duplicate_view_voucher')}
-                </a>
-              </Button>
-            )}
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <Button variant="outline" onClick={onCancel} disabled={busy}>
-                {t('dialog_duplicate_cancel')}
-              </Button>
-              {canMatch ? (
-                <>
-                  <Button variant="outline" onClick={onBookAnyway} disabled={busy}>
-                    {t('dialog_duplicate_book_anyway')}
-                  </Button>
-                  {/* Sibling candidates only: when the row is a duplicate
-                      import of the already-booked twin, ignoring it is the
-                      correct resolution (matching would double-count the bank
-                      side, booking would double-count the ledger side). */}
-                  {canIgnore && (
-                    <Button variant="outline" onClick={handleIgnore} disabled={busy} loading={ignoring}>
-                      {t('dialog_duplicate_ignore')}
-                    </Button>
-                  )}
-                  <Button onClick={handleMatch} disabled={busy} loading={matching}>
-                    {t('dialog_duplicate_match')}
-                  </Button>
-                </>
-              ) : (
-                <Button onClick={onBookAnyway} disabled={busy}>
+          {/* Wraps instead of overflowing: with Ignorera the row holds four
+              buttons, wider than the dialog. */}
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+            <Button variant="outline" onClick={onCancel} disabled={busy}>
+              {t('dialog_duplicate_cancel')}
+            </Button>
+            {canMatch ? (
+              <>
+                <Button variant="outline" onClick={onBookAnyway} disabled={busy}>
                   {t('dialog_duplicate_book_anyway')}
                 </Button>
-              )}
-            </div>
+                {/* Sibling candidates only: when the row is a duplicate
+                    import of the already-booked twin, ignoring it is the
+                    correct resolution (matching would double-count the bank
+                    side, booking would double-count the ledger side). */}
+                {canIgnore && (
+                  <Button variant="outline" onClick={handleIgnore} disabled={busy} loading={ignoring}>
+                    {t('dialog_duplicate_ignore')}
+                  </Button>
+                )}
+                <Button onClick={handleMatch} disabled={busy} loading={matching}>
+                  {t('dialog_duplicate_match')}
+                </Button>
+              </>
+            ) : (
+              <Button onClick={onBookAnyway} disabled={busy}>
+                {t('dialog_duplicate_book_anyway')}
+              </Button>
+            )}
           </div>
         </div>
       </DialogContent>
